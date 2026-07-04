@@ -26,6 +26,8 @@ import asyncio
 import logging
 import argparse
 import threading
+import urllib.error
+import urllib.request
 from pathlib import Path
 from typing import Any, Optional
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
@@ -41,6 +43,7 @@ logger = logging.getLogger(__name__)
 
 
 SUBSCRIPTION_UI_PORT = int(os.getenv("CLAWBODY_SUBSCRIPTION_PORT", "7861"))
+REACHY_DAEMON_URL = os.getenv("REACHY_DAEMON_URL", "http://127.0.0.1:8000").rstrip("/")
 
 
 class _SubscriptionRequestHandler(BaseHTTPRequestHandler):
@@ -581,6 +584,113 @@ class ClawBodyCore:
         except Exception as e:
             logger.warning("Feedback sound failed: %s", e)
 
+    def _daemon_request(self, method: str, path: str) -> dict[str, Any]:
+        """Call the local Reachy daemon API."""
+        request = urllib.request.Request(
+            f"{REACHY_DAEMON_URL}{path}",
+            method=method,
+            headers={"Accept": "application/json"},
+        )
+        try:
+            with urllib.request.urlopen(request, timeout=8) as response:
+                body = response.read().decode("utf-8", errors="replace")
+                return json.loads(body) if body else {"ok": True}
+        except urllib.error.HTTPError as e:
+            body = e.read().decode("utf-8", errors="replace")
+            return {"ok": False, "status": e.code, "error": body or str(e)}
+        except Exception as e:
+            return {"ok": False, "error": str(e)}
+
+    async def _daemon_post(self, path: str) -> dict[str, Any]:
+        return await asyncio.to_thread(self._daemon_request, "POST", path)
+
+    async def _delayed_start_app(self, app_name: str, delay: float = 1.8) -> None:
+        await asyncio.sleep(delay)
+        await self._daemon_post("/api/apps/stop-current-app")
+        await asyncio.sleep(0.8)
+        result = await self._daemon_post(f"/api/apps/start-app/{app_name}")
+        logger.info("Started app %s via voice command: %s", app_name, result)
+
+    async def _delayed_robot_sleep(self, delay: float = 1.8) -> None:
+        await asyncio.sleep(delay)
+        await self._daemon_post("/api/apps/stop-current-app")
+        await asyncio.sleep(0.5)
+        await self._daemon_post("/api/move/play/goto_sleep")
+        await asyncio.sleep(1.0)
+        result = await self._daemon_post("/api/motors/set_mode/disabled")
+        logger.info("Robot sleep via voice command: %s", result)
+
+    async def _set_motors(self, enabled: bool) -> None:
+        mode = "enabled" if enabled else "disabled"
+        result = await self._daemon_post(f"/api/motors/set_mode/{mode}")
+        logger.info("Set motors %s via voice command: %s", mode, result)
+
+    async def _handle_local_command(self, message: str) -> Optional[str]:
+        """Handle local robot commands before sending text to OpenClaw."""
+        text = " ".join(message.lower().strip().split())
+        if not text:
+            return None
+
+        wants_tracking_v2 = any(
+            phrase in text
+            for phrase in (
+                "tracking version 2",
+                "tracking v2",
+                "hand tracking",
+                "hand tracker",
+                "handtracker",
+            )
+        )
+        if wants_tracking_v2 and any(word in text for word in ("start", "starte", "einschalt", "laden", "öffne")):
+            asyncio.create_task(self._delayed_start_app("hand_tracker_v2"))
+            return "Ich starte Tracking Version 2."
+
+        wants_clawbody = "clawbody" in text or "claw body" in text
+        if wants_clawbody and any(word in text for word in ("start", "starte", "restart", "neu starten")):
+            return "ClawBody läuft bereits."
+
+        wants_sleep = any(
+            phrase in text
+            for phrase in (
+                "roboter aus",
+                "reachy aus",
+                "ausschalten",
+                "geh schlafen",
+                "schlafmodus",
+                "roboter schlafen",
+                "leg dich schlafen",
+            )
+        )
+        if wants_sleep:
+            asyncio.create_task(self._delayed_robot_sleep())
+            return "Ich lege den Roboter schlafen und schalte die Motoren aus."
+
+        if "motor" in text and any(word in text for word in ("aus", "deaktivier", "disable")):
+            await self._set_motors(False)
+            return "Motoren sind aus."
+
+        if "motor" in text and any(word in text for word in ("an", "aktivier", "enable")):
+            await self._set_motors(True)
+            return "Motoren sind an."
+
+        if "face tracking" in text or "gesicht tracking" in text or "gesichtserkennung" in text:
+            if self.camera_worker is None:
+                return "Face Tracking ist nicht verfügbar, weil die Kamera nicht aktiv ist."
+            if any(word in text for word in ("aus", "deaktivier", "stop")):
+                self.camera_worker.set_head_tracking_enabled(False)
+                return "Face Tracking ist aus."
+            if any(word in text for word in ("an", "aktivier", "start")):
+                self.camera_worker.set_head_tracking_enabled(True)
+                return "Face Tracking ist an."
+
+        if "realtime" in text or "real time" in text:
+            return (
+                "Realtime und Subscription sind Startmodi. Ich kann das als Button bauen, "
+                "aber zum Umschalten muss ClawBody neu gestartet werden."
+            )
+
+        return None
+
     async def subscription_voice_loop(self) -> None:
         """Forward local STT results to OpenClaw subscription backend."""
         if self._subscription_voice_queue is None:
@@ -606,6 +716,12 @@ class ClawBodyCore:
 
     async def handle_subscription_message(self, message: str) -> str:
         """Send text to OpenClaw and speak the response locally."""
+        local_response = await self._handle_local_command(message)
+        if local_response is not None:
+            if hasattr(self.handler, "speak_text"):
+                await self.handler.speak_text(local_response)
+            return local_response
+
         if self.openclaw_bridge is None:
             raise RuntimeError("OpenClaw bridge is not initialized")
         if not self.openclaw_bridge.is_connected:
