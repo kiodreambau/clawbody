@@ -44,6 +44,10 @@ logger = logging.getLogger(__name__)
 
 SUBSCRIPTION_UI_PORT = int(os.getenv("CLAWBODY_SUBSCRIPTION_PORT", "7861"))
 REACHY_DAEMON_URL = os.getenv("REACHY_DAEMON_URL", "http://127.0.0.1:8000").rstrip("/")
+THINKING_SOUND_PATH = os.getenv(
+    "CLAWBODY_THINKING_SOUND",
+    str(Path.home() / ".openclaw/workspace/assets/sounds/thinking-ui-zoom-in.mp3"),
+)
 
 
 class _SubscriptionRequestHandler(BaseHTTPRequestHandler):
@@ -152,6 +156,8 @@ class _SubscriptionRequestHandler(BaseHTTPRequestHandler):
 	  <section class="status" id="openclaw-status">
 	    <div><strong>OpenClaw</strong><span id="openclaw-connected">checking</span></div>
 	    <div><strong>Session</strong><span id="openclaw-session">checking</span></div>
+	    <div><strong>Tracking</strong><span id="tracking-state">checking</span></div>
+	    <div><strong>Movement</strong><span id="movement-state">checking</span></div>
 	    <div><strong>Last response</strong><span id="openclaw-last">none</span></div>
 	  </section>
 	  <form method="post" action="/chat">
@@ -165,6 +171,8 @@ class _SubscriptionRequestHandler(BaseHTTPRequestHandler):
 	    const soundButton = document.getElementById("sound-test");
 	    const openclawConnected = document.getElementById("openclaw-connected");
 	    const openclawSession = document.getElementById("openclaw-session");
+	    const trackingState = document.getElementById("tracking-state");
+	    const movementState = document.getElementById("movement-state");
 	    const openclawLast = document.getElementById("openclaw-last");
 
 	    async function refreshMic() {{
@@ -179,6 +187,16 @@ class _SubscriptionRequestHandler(BaseHTTPRequestHandler):
 	      const state = await res.json();
 	      openclawConnected.textContent = state.connected ? "connected" : "not connected";
 	      openclawSession.textContent = state.fullSessionKey || "unavailable";
+	      if (state.camera && state.camera.enabled) {{
+	        trackingState.textContent = state.camera.faceTracking ? "face tracking on" : "camera on, tracking off";
+	      }} else {{
+	        trackingState.textContent = "camera unavailable";
+	      }}
+	      if (state.movement) {{
+	        movementState.textContent = state.movement.processing ? "thinking" : (state.movement.is_listening ? "listening" : "ready");
+	      }} else {{
+	        movementState.textContent = "unavailable";
+	      }}
 	      if (state.lastError) {{
 	        openclawLast.textContent = "error: " + state.lastError;
 	      }} else if (state.lastResponseSeconds) {{
@@ -553,12 +571,32 @@ class ClawBodyCore:
         logger.info("Mic %s", "paused" if muted else "listening")
 
     def get_openclaw_status(self) -> dict[str, Any]:
+        camera_status = {
+            "enabled": self.camera_worker is not None,
+            "faceTracking": False,
+            "tracker": None,
+            "hasFrame": False,
+        }
+        if self.camera_worker is not None:
+            camera_status = {
+                "enabled": True,
+                "faceTracking": bool(getattr(self.camera_worker, "is_head_tracking_enabled", False)),
+                "tracker": type(self.camera_worker.head_tracker).__name__ if self.camera_worker.head_tracker else None,
+                "hasFrame": self.camera_worker.get_latest_frame() is not None,
+            }
+        movement_status = self.movement_manager.get_status() if self.movement_manager is not None else None
+
         if self.openclaw_bridge is None:
             return {
                 "connected": False,
                 "lastError": "OpenClaw bridge is not initialized",
+                "camera": camera_status,
+                "movement": movement_status,
             }
-        return self.openclaw_bridge.status()
+        status = self.openclaw_bridge.status()
+        status["camera"] = camera_status
+        status["movement"] = movement_status
+        return status
 
     def play_feedback_sound(self) -> None:
         """Play a short cue through Reachy's speaker path."""
@@ -583,6 +621,15 @@ class ClawBodyCore:
             self.robot.media.push_audio_sample(tone)
         except Exception as e:
             logger.warning("Feedback sound failed: %s", e)
+
+    def play_thinking_sound(self) -> None:
+        """Play a short thinking cue without blocking the main loop."""
+        try:
+            sound_path = Path(THINKING_SOUND_PATH)
+            if sound_path.exists():
+                self.robot.media.play_sound(str(sound_path))
+        except Exception as e:
+            logger.debug("Thinking sound failed: %s", e)
 
     def _daemon_request(self, method: str, path: str) -> dict[str, Any]:
         """Call the local Reachy daemon API."""
@@ -729,15 +776,20 @@ class ClawBodyCore:
             if not connected:
                 raise RuntimeError("OpenClaw gateway is not connected")
 
-        response = await self.openclaw_bridge.chat(
-            message,
-            system_context=(
-                "User is speaking through the Reachy Mini clawbody subscription UI. "
-                "Keep the response concise for spoken output."
-            ),
-        )
-        if response.error:
-            raise RuntimeError(response.error)
+        self.movement_manager.set_processing(True)
+        self.play_thinking_sound()
+        try:
+            response = await self.openclaw_bridge.chat(
+                message,
+                system_context=(
+                    "User is speaking through the Reachy Mini clawbody subscription UI. "
+                    "Keep the response concise for spoken output."
+                ),
+            )
+            if response.error:
+                raise RuntimeError(response.error)
+        finally:
+            self.movement_manager.set_processing(False)
 
         text = response.content.strip()
         if text and hasattr(self.handler, "speak_text"):
@@ -794,35 +846,41 @@ class ClawBodyCore:
         Returns:
             Initialized head tracker or None if initialization fails
         """
-        # Default to YOLO if not specified
-        if tracker_type is None:
-            tracker_type = "yolo"
-        
-        if tracker_type == "yolo":
-            try:
-                from reachy_mini_openclaw.vision.yolo_head_tracker import HeadTracker
-                logger.info("Initializing YOLO face tracker...")
-                tracker = HeadTracker(device="cpu")  # CPU is fast enough for face detection
-                logger.info("YOLO face tracker initialized")
-                return tracker
-            except ImportError as e:
-                logger.warning(f"YOLO tracker not available: {e}")
-                logger.warning("Install with: pip install ultralytics supervision")
-            except Exception as e:
-                logger.error(f"Failed to initialize YOLO tracker: {e}")
-        
-        elif tracker_type == "mediapipe":
-            try:
-                from reachy_mini_openclaw.vision.mediapipe_tracker import HeadTracker
-                logger.info("Initializing MediaPipe face tracker...")
-                tracker = HeadTracker()
-                logger.info("MediaPipe face tracker initialized")
-                return tracker
-            except ImportError as e:
-                logger.warning(f"MediaPipe tracker not available: {e}")
-            except Exception as e:
-                logger.error(f"Failed to initialize MediaPipe tracker: {e}")
-        
+        # Default to YOLO if available, then fall back to MediaPipe. On the
+        # Reachy desktop app install, MediaPipe is usually present while YOLO's
+        # ultralytics/supervision stack often is not.
+        tracker_candidates = [tracker_type] if tracker_type else ["yolo", "mediapipe"]
+        if tracker_candidates == ["yolo"]:
+            tracker_candidates.append("mediapipe")
+        if tracker_candidates == ["mediapipe"]:
+            tracker_candidates.append("yolo")
+
+        for candidate in tracker_candidates:
+            if candidate == "yolo":
+                try:
+                    from reachy_mini_openclaw.vision.yolo_head_tracker import HeadTracker
+                    logger.info("Initializing YOLO face tracker...")
+                    tracker = HeadTracker(device="cpu")  # CPU is fast enough for face detection
+                    logger.info("YOLO face tracker initialized")
+                    return tracker
+                except ImportError as e:
+                    logger.warning(f"YOLO tracker not available: {e}")
+                    logger.warning("Install with: pip install ultralytics supervision")
+                except Exception as e:
+                    logger.error(f"Failed to initialize YOLO tracker: {e}")
+
+            elif candidate == "mediapipe":
+                try:
+                    from reachy_mini_openclaw.vision.mediapipe_tracker import HeadTracker
+                    logger.info("Initializing MediaPipe face tracker...")
+                    tracker = HeadTracker()
+                    logger.info("MediaPipe face tracker initialized")
+                    return tracker
+                except ImportError as e:
+                    logger.warning(f"MediaPipe tracker not available: {e}")
+                except Exception as e:
+                    logger.error(f"Failed to initialize MediaPipe tracker: {e}")
+
         logger.warning("No face tracker available - face tracking disabled")
         return None
         

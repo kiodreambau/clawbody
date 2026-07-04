@@ -11,6 +11,9 @@ Tool Categories:
 import json
 import logging
 import base64
+import random
+import re
+import unicodedata
 from dataclasses import dataclass
 from typing import Any, Optional, TYPE_CHECKING
 
@@ -22,6 +25,70 @@ if TYPE_CHECKING:
     from reachy_mini_openclaw.openclaw_bridge import OpenClawBridge
 
 logger = logging.getLogger(__name__)
+
+
+_RECORDED_EMOTIONS: Any = None
+_EMOTION_INTENT_TO_MOVES: dict[str, tuple[str, ...]] = {
+    "happy": ("laughing2", "laughing1", "cheerful1"),
+    "excited": ("dance3", "dance2", "enthusiastic2", "enthusiastic1"),
+    "loving": ("loving1",),
+    "grateful": ("grateful1",),
+    "success": ("success1", "success2"),
+    "thinking": ("thoughtful1", "thoughtful2"),
+    "attentive": ("attentive1", "attentive2"),
+    "curious": ("curious1", "inquiring2", "inquiring1"),
+    "confused": ("confused1", "uncertain1"),
+    "sad": ("sad1", "sad2", "downcast1"),
+    "angry": ("rage1", "irritated2", "irritated1"),
+    "irritated": ("irritated1", "irritated2", "displeased2"),
+    "surprised": ("surprised1", "surprised2", "amazed1"),
+    "sleepy": ("sleep1", "exhausted1", "tired1"),
+    "yes": ("yes1", "understanding2"),
+    "no": ("no1", "no_sad1", "no_excited1"),
+    "welcoming": ("welcoming2", "welcoming1"),
+    "dance": ("dance2", "dance3", "dance1"),
+}
+_CURATED_EMOTION_FALLBACKS: tuple[str, ...] = (
+    "thoughtful1",
+    "attentive1",
+    "curious1",
+    "laughing2",
+    "success1",
+    "confused1",
+    "surprised1",
+    "welcoming2",
+)
+
+
+def _normalize_key(value: str) -> str:
+    without_accents = unicodedata.normalize("NFKD", value).encode("ascii", "ignore").decode("ascii")
+    return re.sub(r"[^a-z0-9]+", "_", without_accents.lower()).strip("_")
+
+
+def _load_recorded_emotions() -> Any:
+    global _RECORDED_EMOTIONS
+    if _RECORDED_EMOTIONS is None:
+        from reachy_mini.motion.recorded_move import RecordedMoves
+
+        _RECORDED_EMOTIONS = RecordedMoves("pollen-robotics/reachy-mini-emotions-library")
+    return _RECORDED_EMOTIONS
+
+
+def _resolve_emotion_name(requested: str, available: list[str]) -> str:
+    available_by_key = {_normalize_key(name): name for name in available}
+    requested_key = _normalize_key(requested or "")
+    if requested_key in available_by_key:
+        return available_by_key[requested_key]
+
+    candidates = _EMOTION_INTENT_TO_MOVES.get(requested_key, ())
+    for candidate in candidates:
+        if candidate in available:
+            return candidate
+
+    curated = [name for name in _CURATED_EMOTION_FALLBACKS if name in available]
+    if curated:
+        return random.choice(curated)
+    return random.choice(available)
 
 
 async def _analyze_image_with_openai(frame: np.ndarray, prompt: str) -> Optional[str]:
@@ -152,7 +219,7 @@ TOOL_SPECS = [
             "properties": {
                 "dance_name": {
                     "type": "string",
-                    "enum": ["happy", "excited", "wave", "nod", "shake", "bounce"],
+                    "enum": ["dance1", "dance2", "dance3", "happy", "excited", "wave", "nod", "shake", "bounce"],
                     "description": "The dance to perform"
                 }
             },
@@ -168,7 +235,26 @@ TOOL_SPECS = [
             "properties": {
                 "emotion_name": {
                     "type": "string",
-                    "enum": ["happy", "sad", "surprised", "curious", "thinking", "confused", "excited"],
+                    "enum": [
+                        "happy",
+                        "sad",
+                        "surprised",
+                        "curious",
+                        "thinking",
+                        "confused",
+                        "excited",
+                        "loving",
+                        "grateful",
+                        "success",
+                        "attentive",
+                        "angry",
+                        "irritated",
+                        "sleepy",
+                        "yes",
+                        "no",
+                        "welcoming",
+                        "dance",
+                    ],
                     "description": "The emotion to express"
                 }
             },
@@ -392,22 +478,19 @@ async def _handle_dance(args: dict, deps: ToolDependencies) -> dict:
     dance_name = args.get("dance_name", "happy")
     
     try:
-        # Try to use dance library if available
-        from reachy_mini_dances_library import dances
-        
-        if hasattr(dances, dance_name):
-            dance_class = getattr(dances, dance_name)
-            dance_move = dance_class()
-            deps.movement_manager.queue_move(dance_move)
-            return {"status": "success", "dance": dance_name}
-        else:
-            # Fallback to simple head movement
-            return await _handle_emotion({"emotion_name": dance_name}, deps)
-    except ImportError:
-        # No dance library, use emotion as fallback
-        return await _handle_emotion({"emotion_name": dance_name}, deps)
+        from reachy_mini_conversation_app.dance_emotion_moves import DanceQueueMove
+        from reachy_mini_dances_library.collection.dance import AVAILABLE_MOVES
+
+        normalized = _normalize_key(str(dance_name or ""))
+        if normalized in ("happy", "excited", "dance", "dance1", "dance2", "dance3"):
+            normalized = random.choice(["groovy_sway_and_roll", "side_to_side_sway", "yeah_nod"])
+        if normalized in AVAILABLE_MOVES:
+            deps.movement_manager.queue_move(DanceQueueMove(normalized))
+            return {"status": "queued", "dance": normalized}
     except Exception as e:
-        return {"error": str(e)}
+        logger.info("Dance library unavailable or failed, using emotion fallback: %s", e)
+
+    return await _handle_emotion({"emotion_name": dance_name}, deps)
 
 
 async def _handle_emotion(args: dict, deps: ToolDependencies) -> dict:
@@ -415,6 +498,18 @@ async def _handle_emotion(args: dict, deps: ToolDependencies) -> dict:
     from reachy_mini_openclaw.moves import HeadLookMove
     
     emotion_name = args.get("emotion_name", "happy")
+
+    try:
+        from reachy_mini_conversation_app.dance_emotion_moves import EmotionQueueMove
+
+        library = _load_recorded_emotions()
+        available = library.list_moves()
+        if available:
+            resolved = _resolve_emotion_name(str(emotion_name), available)
+            deps.movement_manager.queue_move(EmotionQueueMove(resolved, library))
+            return {"status": "queued", "emotion": resolved, "source": "recorded_emotions"}
+    except Exception as e:
+        logger.warning("Recorded emotion failed, using simple fallback: %s", e)
     
     # Map emotions to simple head movements
     emotion_sequences = {
