@@ -4,8 +4,8 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "clawbody"
-version = "0.1.0+openclaw1"
-description = "ClawBody - Give your OpenClaw AI agent a physical robot body with Reachy Mini. Voice conversation powered by OpenAI Realtime API with expressive movements."
+version = "0.1.0+kiodream1"
+description = "ClawBody - Give your OpenClaw/Codex subscription a physical robot body with Reachy Mini."
 readme = "README.md"
 license = {text = "Apache-2.0"}
 requires-python = ">=3.11"
@@ -35,7 +35,8 @@ classifiers = [
     "Topic :: Scientific/Engineering :: Human Machine Interfaces",
 ]
 dependencies = [
-    # OpenAI Realtime API
+    # Optional OpenAI Realtime API path. Without OPENAI_API_KEY, ClawBody uses
+    # the local OpenClaw gateway subscription bridge.
     "openai>=1.50.0",
     
     # Audio streaming
@@ -98,10 +99,10 @@ clawbody = "reachy_mini_openclaw.main:main"
 clawbody = "reachy_mini_openclaw.main:ClawBodyApp"
 
 [project.urls]
-Homepage = "https://github.com/yourusername/clawbody"
-Documentation = "https://github.com/yourusername/clawbody#readme"
-Repository = "https://github.com/yourusername/clawbody"
-Issues = "https://github.com/yourusername/clawbody/issues"
+Homepage = "https://github.com/kiodreambau/clawbody"
+Documentation = "https://github.com/kiodreambau/clawbody#readme"
+Repository = "https://github.com/kiodreambau/clawbody"
+Issues = "https://github.com/kiodreambau/clawbody/issues"
 
 [tool.setuptools.packages.find]
 where = ["src"]

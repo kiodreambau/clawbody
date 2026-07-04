@@ -35,7 +35,7 @@ tags:
 
 **Give your OpenClaw AI agent a physical robot body!**
 
-ClawBody combines OpenClaw's AI intelligence with Reachy Mini's expressive robot body, using OpenAI's Realtime API for ultra-responsive voice conversation. Your OpenClaw assistant (Clawson) can now see, hear, speak, and move in the physical world.
+ClawBody combines OpenClaw's AI intelligence with Reachy Mini's expressive robot body. This fork defaults to the local OpenClaw/Codex subscription bridge when no `OPENAI_API_KEY` is configured, and can still use the OpenAI Realtime API when an API key is available.
 
 ![Reachy Mini Dance](https://huggingface.co/spaces/pollen-robotics/reachy_mini_conversation_app/resolve/main/docs/assets/reachy_mini_dance.gif)
 
@@ -93,7 +93,7 @@ clawbody --gradio
 ## ✨ Features
 
 - **👁️ Face Tracking**: Robot tracks your face and maintains eye contact during conversation
-- **🎤 Real-time Voice Conversation**: OpenAI Realtime API for sub-second response latency
+- **🎤 Voice Conversation**: OpenClaw/Codex subscription mode by default, with optional OpenAI Realtime API support
 - **🧠 OpenClaw Intelligence**: Your responses come from OpenClaw with full tool access
 - **👀 Vision**: See through the robot's camera and describe the environment
 - **💃 Expressive Movements**: Natural head movements, emotions, dances, and audio-driven wobble
@@ -156,7 +156,8 @@ clawbody --gradio
 - Python 3.11+
 - [Reachy Mini SDK](https://github.com/pollen-robotics/reachy_mini) installed
 - [OpenClaw](https://github.com/openclaw/openclaw) gateway running
-- OpenAI API key with Realtime API access
+- OpenClaw gateway running locally
+- Optional: OpenAI API key with Realtime API access
 
 ## 🚀 Installation
 
@@ -164,7 +165,7 @@ clawbody --gradio
 
 ```bash
 # Clone ClawBody
-git clone https://github.com/tomrikert/clawbody
+git clone https://github.com/kiodreambau/clawbody
 cd clawbody
 
 # Create virtual environment
@@ -196,7 +197,7 @@ clawbody --gradio
 ssh pollen@reachy-mini.local
 
 # Clone the repository
-git clone https://github.com/tomrikert/clawbody
+git clone https://github.com/kiodreambau/clawbody
 cd clawbody
 
 # Install in the apps virtual environment
@@ -214,7 +215,7 @@ cp .env.example .env
 2. Edit `.env` with your configuration:
 
 ```bash
-# Required
+# Optional: enables OpenAI Realtime API mode. Leave unset for subscription mode.
 OPENAI_API_KEY=sk-...your-key...
 
 # OpenClaw Gateway (required for AI responses)
@@ -316,6 +317,6 @@ ClawBody builds on:
 
 Contributions are welcome! Please feel free to submit a Pull Request.
 
-- **This project**: [GitHub Issues](https://github.com/tomrikert/clawbody/issues)
+- **This project**: [GitHub Issues](https://github.com/kiodreambau/clawbody/issues)
 - **OpenClaw Skills**: Submit ClawBody as a skill to [ClawHub](https://docs.openclaw.ai/tools/clawhub)
 - **Reachy Mini Apps**: Submit to [Pollen Robotics](https://github.com/pollen-robotics)
