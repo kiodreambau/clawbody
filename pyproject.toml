@@ -59,6 +59,8 @@ dependencies = [
 # Or on the robot, it's pre-installed.
 
 [project.optional-dependencies]
+kiyo-voice = ["mlx-whisper>=0.4.3,<0.5", "silero-vad>=6.2,<7", "sounddevice>=0.5,<0.6"]
+kiyo-calendar = ["google-auth-oauthlib>=1.2,<2"]
 wireless = [
     "pygobject",
 ]
@@ -93,6 +95,7 @@ dev = [
 ]
 
 [project.scripts]
+kiyo = "kiyo.cli:main"
 clawbody = "reachy_mini_openclaw.main:main"
 
 [project.entry-points."reachy_mini_apps"]
@@ -120,3 +123,6 @@ python_version = "3.11"
 warn_return_any = true
 warn_unused_configs = true
 ignore_missing_imports = true
+
+[tool.setuptools.package-data]
+kiyo = ["SOUL.md"]

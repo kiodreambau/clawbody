@@ -5,3 +5,7 @@ dist/
 *.egg-info/
 .venv/
 .env
+
+# Kiyo OAuth credentials (local only)
+client_secret*.json
+google-calendar.json
