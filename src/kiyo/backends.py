@@ -141,16 +141,20 @@ def session_history(settings, key, limit, *, profile=None):
     for row in result.get("messages", []):
         if row.get("role") not in {"user", "assistant"} or row.get("display") is False:
             continue
-        content = row.get("content", [])
-        if isinstance(content, list):
-            content = "\n".join(
-                part["text"]
-                for part in content
-                if isinstance(part, dict) and part.get("type") == "text" and isinstance(part.get("text"), str)
-            )
-        if isinstance(content, str) and content.strip():
+        content = message_text(row.get("content"))
+        if content:
             messages.append({"role": row["role"], "text": content})
     return messages
+
+
+def message_text(content):
+    if isinstance(content, list):
+        content = "\n".join(
+            part["text"]
+            for part in content
+            if isinstance(part, dict) and part.get("type") == "text" and isinstance(part.get("text"), str)
+        )
+    return content.strip() if isinstance(content, str) else ""
 
 
 def messages_prompt(soul, history, message):
@@ -257,11 +261,7 @@ def reply(settings, backend, history, message, session_id, *, profile=None, targ
     return answer.strip()
 
 
-def remote_sessions(settings, backend, node, limit, *, profile=None):
-    commands = {
-        "codex": "codex.appServer.threads.list.v1",
-        "claude": "anthropic.claude.sessions.list.v1",
-    }
+def node_payload(settings, node, method, params, *, profile=None):
     command = [settings.executable("openclaw")]
     if profile:
         command += ["--profile", profile]
@@ -273,14 +273,51 @@ def remote_sessions(settings, backend, node, limit, *, profile=None):
             "--node",
             node,
             "--command",
-            commands[backend],
+            method,
             "--params",
-            json.dumps({"limit": limit}),
+            json.dumps(params),
             "--json",
         ],
         "OpenClaw",
         timeout=20,
     )
     if not result.get("ok") or not isinstance(result.get("payload"), dict):
-        raise KiyoError("Der gekoppelte Rechner hat keine Sitzungsliste geliefert.")
+        raise KiyoError("Der gekoppelte Rechner hat keine lesbare Antwort geliefert.")
     return result["payload"]
+
+
+def remote_sessions(settings, backend, node, limit, *, profile=None):
+    commands = {
+        "codex": "codex.appServer.threads.list.v1",
+        "claude": "anthropic.claude.sessions.list.v1",
+    }
+    return node_payload(settings, node, commands[backend], {"limit": limit}, profile=profile)
+
+
+def remote_history(settings, backend, node, thread_id, limit, *, profile=None):
+    commands = {
+        "codex": "codex.appServer.thread.turns.list.v1",
+        "claude": "anthropic.claude.sessions.read.v1",
+    }
+    payload = node_payload(
+        settings,
+        node,
+        commands[backend],
+        {"threadId": thread_id, "limit": limit},
+        profile=profile,
+    )
+    if backend == "claude":
+        if payload.get("threadId") != thread_id:
+            raise KiyoError("Der Rechner hat die gewählte Claude-Sitzung nicht bestätigt.")
+        items = payload.get("items", [])
+    else:
+        items = [item for turn in payload.get("data", []) for item in turn.get("items", [])]
+    roles = {"userMessage": "user", "agentMessage": "assistant"}
+    messages = []
+    for item in items:
+        role = roles.get(item.get("type"))
+        if role:
+            body = message_text(item.get("text")) or message_text(item.get("content"))
+            if body:
+                messages.append({"role": role, "text": body})
+    return messages[-limit:]

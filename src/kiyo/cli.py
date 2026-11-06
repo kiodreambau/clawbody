@@ -51,6 +51,14 @@ def build_parser():
     remote.add_argument("--node", required=True)
     remote.add_argument("--via", default="lokal")
     remote.add_argument("--limit", type=int, choices=range(1, 31), default=10)
+    remote_history = commands.add_parser(
+        "remote-history", help="Verlauf einer Sitzung auf einem gekoppelten Rechner lesen"
+    )
+    remote_history.add_argument("backend", choices=("codex", "claude"))
+    remote_history.add_argument("thread_id")
+    remote_history.add_argument("--node", required=True)
+    remote_history.add_argument("--via", default="lokal")
+    remote_history.add_argument("--limit", type=int, choices=range(1, 31), default=10)
     commands.add_parser("tasks", help="Per Sprache vorgemerkte OpenClaw-Aufträge anzeigen")
     approve = commands.add_parser("approve", help="Einen vorgemerkten Auftrag freigeben und ausführen")
     approve.add_argument("id")
@@ -181,6 +189,15 @@ def dispatch(args, settings):
             {key: row.get(key) for key in ("threadId", "name", "source", "status", "updatedAt")}
             for row in result.get("sessions", [])
         ]
+    if command == "remote-history":
+        return backends.remote_history(
+            settings,
+            args.backend,
+            args.node,
+            args.thread_id,
+            args.limit,
+            profile=profile,
+        )
     if command == "computers":
         result = backends.claw_call(settings, "node.list", profile=profile)
         return [{k: row.get(k) for k in ("displayName", "connected", "platform")} for row in result.get("nodes", [])]

@@ -34,6 +34,7 @@ kiyo sessions --parent wochenplanung
 kiyo session-history wochenplanung
 kiyo remote-sessions codex --node "Dreambau M4"
 kiyo remote-sessions claude --node "Dreambau M4"
+kiyo remote-history codex THREAD-ID --node "Dreambau M4" --limit 3
 kiyo tasks
 kiyo approve ID
 kiyo delegate "Fasse die folgenden Punkte zusammen …"
@@ -49,7 +50,8 @@ die lokale Konfiguration und zeigen auf den genauen Sitzungsschlüssel.
 `kiyo session-history` liest den Verlauf im Terminal.
 
 Das Kommando `remote-sessions` listet Sitzungen über die vorhandenen OpenClaw-Plugins
-des gekoppelten Rechners. Das Gateway kontrolliert, welche Rechner und
+des gekoppelten Rechners. `remote-history` liest Gesprächsbeiträge der explizit
+ausgewählten Sitzung im Terminal. Das Gateway kontrolliert, welche Rechner und
 Schnittstellen erreichbar sind. `kiyo delegate --node "Rechnername" "…"`
 bindet eine neue Sitzung an einen Rechner, der `system.run` anbietet. Dessen
 OpenClaw-Berechtigungen gelten für die Ausführung. Kiyo wiederholt einen

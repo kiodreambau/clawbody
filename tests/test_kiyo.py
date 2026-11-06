@@ -139,6 +139,35 @@ class AssistantTest(unittest.TestCase):
             history = backends.session_history(self.settings, key, 10)
         self.assertEqual(history, [{"role": "assistant", "text": "sichtbar"}])
 
+    def test_remote_codex_history_reads_only_recent_conversation_items(self):
+        payload = {
+            "data": [
+                {
+                    "items": [
+                        {"type": "userMessage", "content": [{"type": "text", "text": "Frage"}]},
+                        {"type": "commandExecution", "aggregatedOutput": "tool log"},
+                        {"type": "agentMessage", "text": "Antwort"},
+                    ]
+                },
+            ]
+        }
+        args = build_parser().parse_args(["remote-history", "codex", "thread-1", "--node", "M4", "--limit", "1"])
+        with patch.object(backends, "node_payload", return_value=payload) as rpc:
+            history = dispatch(args, self.settings)
+        self.assertEqual(history, [{"role": "assistant", "text": "Antwort"}])
+        rpc.assert_called_once_with(
+            self.settings,
+            "M4",
+            "codex.appServer.thread.turns.list.v1",
+            {"threadId": "thread-1", "limit": 1},
+            profile=None,
+        )
+
+    def test_remote_claude_history_rejects_a_different_session(self):
+        with patch.object(backends, "node_payload", return_value={"threadId": "other", "items": []}):
+            with self.assertRaisesRegex(KiyoError, "gewählte Claude-Sitzung"):
+                backends.remote_history(self.settings, "claude", "M4", "thread-1", 1)
+
     def test_voice_agents_fail_closed_without_restricted_profiles(self):
         with self.assertRaisesRegex(KiyoError, "eigenes Hermes-Profil"):
             backends.reply(self.settings, "hermes", [], "Hallo", "probe", voice=True)
