@@ -10,6 +10,7 @@ from zoneinfo import ZoneInfo
 
 from kiyo import backends, calendar
 from kiyo.assistant import Assistant
+from kiyo.robot import WAKE
 from kiyo.settings import KiyoError, Settings
 
 
@@ -85,6 +86,13 @@ class AssistantTest(unittest.TestCase):
             backends.reply(self.settings, "hermes", [], "Hallo", "probe", voice=True)
         with self.assertRaisesRegex(KiyoError, "Kiyo-Terminal"):
             backends.reply(self.settings, "openclaw", [], "Hallo", "probe", voice=True)
+
+
+class WakeTest(unittest.TestCase):
+    def test_recognizes_name_at_start_and_as_part_of_greeting(self):
+        for text in ("Kio, hallo", "Hey Kiyo.", "Herr Kiyo, sag Hallo."):
+            self.assertIsNotNone(WAKE.match(text))
+        self.assertIsNone(WAKE.match("Ich habe Kiyo gesagt."))
 
 
 class CalendarTest(unittest.TestCase):

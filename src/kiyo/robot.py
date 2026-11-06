@@ -17,7 +17,7 @@ from .settings import KiyoError
 
 RATE = 16000
 FRAME = 512
-WAKE = re.compile(r"^(?:hey[ ,]+)?(?:kiyo|kio|kijo|kyo|kiko)\b[\s,.!?;:–-]*", re.IGNORECASE)
+WAKE = re.compile(r"^(?:(?:hey|herr|hallo)[ ,]+)?(?:kiyo|kio|kijo|kyo|kiko)\b[\s,.!?;:–-]*", re.IGNORECASE)
 SLEEP = {"schlaf", "schlaf weiter", "hör auf zuzuhören", "bis später", "gute nacht"}
 
 
@@ -167,6 +167,7 @@ def listen(settings, assistant):
         vad = VADIterator(load_silero_vad(), sampling_rate=RATE, min_silence_duration_ms=480)
         active_until = 0.0
         with microphone(settings) as (stream, rate, read, drain):
+            read()  # Opening a stream alone does not prove that the device sends samples.
             print("Kiyo hört am Reachy Mini auf seinen Namen.", flush=True)
             for speech in utterances(read, vad, rate):
                 stream.stop()
@@ -212,6 +213,7 @@ def transcribe(settings, speech):
         path_or_hf_repo=model,
         language=language,
         verbose=None,
+        initial_prompt="Hey Kiyo, sag mir, was heute ansteht." if language == "de" else "Hey Kiyo.",
         condition_on_previous_text=False,
     )
     return result["text"].strip()
