@@ -33,6 +33,8 @@ tags:
 
 # 🦞🤖 ClawBody
 
+**Kiyo auf diesem Fork:** [Sprachmodus, Agentenwechsel und CLI einrichten](KIYO.md).
+
 **Give your OpenClaw AI agent a physical robot body!**
 
 ClawBody combines OpenClaw's AI intelligence with Reachy Mini's expressive robot body. This fork defaults to the local OpenClaw/Codex subscription bridge when no `OPENAI_API_KEY` is configured, and can still use the OpenAI Realtime API when an API key is available.
