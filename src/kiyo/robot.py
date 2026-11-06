@@ -3,12 +3,14 @@
 import fcntl
 import math
 import os
+import queue
 import re
 import subprocess
 import tempfile
 import time
 import wave
 from collections import deque
+from contextlib import contextmanager
 from pathlib import Path
 
 from .settings import KiyoError
@@ -70,7 +72,46 @@ def speak(settings, text):
         raise KiyoError("Kiyo konnte den Text am Reachy Mini nicht ausgeben.") from exc
 
 
-def utterances(stream, vad, input_rate, frame_size):
+@contextmanager
+def microphone(settings):
+    import sounddevice as sd
+
+    index, device = audio_device(settings, sd, "input")
+    rate = int(device["default_samplerate"])
+    frame_size = round(rate * FRAME / RATE)
+    frames = queue.Queue(maxsize=32)
+
+    def capture(indata, _frames, _time, status):
+        try:
+            frames.put_nowait((indata.copy(), bool(status)))
+        except queue.Full:
+            pass
+
+    def read():
+        try:
+            return frames.get(timeout=3)
+        except queue.Empty as exc:
+            raise KiyoError("Vom Reachy-Mikrofon kommen keine Daten. Prüfe die USB-Verbindung.") from exc
+
+    def drain():
+        while not frames.empty():
+            frames.get_nowait()
+
+    try:
+        with sd.InputStream(
+            device=index,
+            samplerate=rate,
+            channels=min(2, device["max_input_channels"]),
+            dtype="float32",
+            blocksize=frame_size,
+            callback=capture,
+        ) as stream:
+            yield stream, rate, read, drain
+    except sd.PortAudioError as exc:
+        raise KiyoError("Das Mikrofon des Reachy Mini ist nicht verfügbar.") from exc
+
+
+def utterances(read, vad, input_rate):
     import numpy as np
     import torch
     from scipy.signal import resample_poly
@@ -79,7 +120,7 @@ def utterances(stream, vad, input_rate, frame_size):
     speech = []
     divisor = math.gcd(input_rate, RATE)
     while True:
-        samples, overflowed = stream.read(frame_size)
+        samples, overflowed = read()
         if overflowed:
             vad.reset_states()
             before.clear()
@@ -90,7 +131,8 @@ def utterances(stream, vad, input_rate, frame_size):
         frame = frame[:FRAME]
         if len(frame) < FRAME:
             frame = np.pad(frame, (0, FRAME - len(frame)))
-        event = vad(torch.from_numpy(frame)) or {}
+        vad_frame = np.clip(frame * 4, -1, 1)
+        event = vad(torch.from_numpy(vad_frame)) or {}
         if speech:
             speech.append(frame)
             if "end" in event or len(speech) >= 500:
@@ -107,7 +149,6 @@ def utterances(stream, vad, input_rate, frame_size):
 
 def listen(settings, assistant):
     try:
-        import sounddevice as sd
         import torch
         from silero_vad import VADIterator, load_silero_vad
     except ImportError as exc:
@@ -124,47 +165,46 @@ def listen(settings, assistant):
 
         torch.set_num_threads(1)
         vad = VADIterator(load_silero_vad(), sampling_rate=RATE, min_silence_duration_ms=480)
-        index, device = audio_device(settings, sd, "input")
-        input_rate = int(device["default_samplerate"])
-        frame_size = round(input_rate * FRAME / RATE)
         active_until = 0.0
-        try:
-            with sd.InputStream(
-                device=index, samplerate=input_rate, channels=1, dtype="float32", blocksize=frame_size
-            ) as stream:
-                print("Kiyo hört am Reachy Mini auf seinen Namen.", flush=True)
-                for speech in utterances(stream, vad, input_rate, frame_size):
-                    stream.stop()
+        with microphone(settings) as (stream, rate, read, drain):
+            print("Kiyo hört am Reachy Mini auf seinen Namen.", flush=True)
+            for speech in utterances(read, vad, rate):
+                stream.stop()
+                try:
+                    text = transcribe(settings, speech)
+                    if not text:
+                        continue
+                    wake = WAKE.match(text)
+                    if wake:
+                        text = text[wake.end() :].strip()
+                    elif time.monotonic() >= active_until:
+                        continue
+                    if text.casefold().rstrip(".!?") in SLEEP:
+                        speak(settings, "Bis später.")
+                        active_until = 0
+                        continue
+                    print("Sprachanfrage erkannt.", flush=True)
                     try:
-                        text = transcribe(settings, speech)
-                        if not text:
-                            continue
-                        wake = WAKE.match(text)
-                        if wake:
-                            text = text[wake.end() :].strip()
-                        elif time.monotonic() >= active_until:
-                            continue
-                        if text.casefold().rstrip(".!?") in SLEEP:
-                            speak(settings, "Bis später.")
-                            active_until = 0
-                            continue
-                        print("Sprachanfrage erkannt.", flush=True)
-                        try:
-                            answer = assistant.ask(text, voice=True) if text else "Ja, ich höre."
-                        except KiyoError as exc:
-                            answer = str(exc)
-                        speak(settings, answer)
-                        print("Antwort am Reachy Mini ausgegeben.", flush=True)
-                        active_until = time.monotonic() + 45
-                    finally:
-                        stream.start()
-        except sd.PortAudioError as exc:
-            raise KiyoError("Das Mikrofon des Reachy Mini ist nicht verfügbar.") from exc
+                        answer = assistant.ask(text, voice=True) if text else "Ja, ich höre."
+                    except KiyoError as exc:
+                        answer = str(exc)
+                    speak(settings, answer)
+                    print("Antwort am Reachy Mini ausgegeben.", flush=True)
+                    active_until = time.monotonic() + 45
+                finally:
+                    drain()
+                    stream.start()
 
 
 def transcribe(settings, speech):
     import mlx_whisper
+    import numpy as np
 
+    peak = float(np.max(np.abs(speech)))
+    if peak < 0.004:
+        return ""
+    if peak < 0.4:
+        speech = speech * min(0.65 / peak, 15)
     model = settings.get("reachy", "whisper_model", "mlx-community/whisper-base-mlx")
     language = settings.get("reachy", "language", "de")
     result = mlx_whisper.transcribe(
@@ -179,19 +219,14 @@ def transcribe(settings, speech):
 
 def microphone_test(settings, seconds):
     import numpy as np
-    import sounddevice as sd
     from scipy.signal import resample_poly
 
-    index, device = audio_device(settings, sd, "input")
-    input_rate = int(device["default_samplerate"])
     print("Jetzt sprechen. Kiyo verarbeitet den Testsatz lokal.", flush=True)
-    try:
-        speech = sd.rec(
-            input_rate * seconds, samplerate=input_rate, channels=1, dtype="float32", device=index, blocking=True
-        ).ravel()
-    except sd.PortAudioError as exc:
-        raise KiyoError("Das Mikrofon des Reachy Mini ist nicht verfügbar.") from exc
-    if np.max(np.abs(speech)) < 0.01:
-        raise KiyoError("Das Reachy-Mikrofon hat kein deutliches Sprachsignal erkannt.")
-    divisor = math.gcd(input_rate, RATE)
-    return transcribe(settings, resample_poly(speech, RATE // divisor, input_rate // divisor))
+    with microphone(settings) as (_, rate, read, _):
+        captured = [read()[0] for _ in range(round(seconds * RATE / FRAME))]
+    speech = np.concatenate(captured).mean(axis=1, dtype=np.float32)
+    divisor = math.gcd(rate, RATE)
+    text = transcribe(settings, resample_poly(speech, RATE // divisor, rate // divisor))
+    if not text:
+        raise KiyoError("Das Reachy-Mikrofon hat keinen verständlichen Testsatz geliefert.")
+    return text

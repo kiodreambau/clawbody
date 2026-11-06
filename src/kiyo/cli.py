@@ -119,8 +119,6 @@ def dispatch(args, settings):
         if command == "audio-test":
             speak(settings, " ".join(args.text))
             return "Testsatz über Reachy Mini ausgegeben."
-        if reachy_status(settings) != "running":
-            raise KiyoError("Der Reachy-Mini-Daemon muss laufen.")
         return listen(settings, assistant)
     if command == "calendar-connect":
         return calendar.authorize(settings, args.client_json)
