@@ -2,6 +2,7 @@
 
 import json
 import os
+import re
 import subprocess
 import tempfile
 from pathlib import Path
@@ -10,6 +11,17 @@ from urllib.parse import urlsplit
 from urllib.request import HTTPRedirectHandler, Request, build_opener
 
 from .settings import KiyoError
+
+SESSION_KEY = re.compile(r"agent:[a-z0-9_-]+:[a-zA-Z0-9_:.@/+\-=]{1,250}")
+
+
+def session_key(settings, value):
+    if SESSION_KEY.fullmatch(value):
+        return value
+    key = settings.get("openclaw_sessions", value.lower(), value)
+    if not isinstance(key, str) or not SESSION_KEY.fullmatch(key):
+        raise KiyoError("Gib einen OpenClaw-Sitzungsschlüssel oder einen eingerichteten Sitzungsnamen an.")
+    return key
 
 
 class RejectRedirect(HTTPRedirectHandler):
@@ -87,6 +99,58 @@ def claw_call(settings, method, params=None, *, profile=None, final=False):
     if params:
         command.extend(("--params", json.dumps(params, ensure_ascii=False)))
     return run_json(command, "OpenClaw", timeout=95 if final else 18)
+
+
+def describe_session(settings, key, *, profile=None):
+    result = claw_call(settings, "sessions.describe", {"key": key}, profile=profile)
+    row = result.get("session")
+    if not isinstance(row, dict) or row.get("key") != key:
+        raise KiyoError("OpenClaw hat die ausgewählte Sitzung nicht bestätigt.")
+    return row
+
+
+def prepare_session(settings, key, *, parent=None, node=None, profile=None):
+    params = {"key": key, "idempotencyKey": key}
+    if parent:
+        row = describe_session(settings, parent, profile=profile)
+        params.update(parentSessionKey=parent, spawnDepth=(row.get("spawnDepth") or 0) + 1)
+        if row.get("visibility"):
+            params["visibility"] = row["visibility"]
+    if node:
+        nodes = claw_call(settings, "node.list", profile=profile).get("nodes", [])
+        matches = [row for row in nodes if node in (row.get("nodeId"), row.get("displayName"))]
+        if len(matches) != 1 or not matches[0].get("connected") or not matches[0].get("paired"):
+            raise KiyoError("Der gewählte OpenClaw-Rechner ist nicht eindeutig verbunden und gekoppelt.")
+        if "system.run" not in matches[0].get("commands", []):
+            raise KiyoError("Der gewählte Rechner bietet OpenClaw derzeit keine Befehlsausführung an.")
+        params["execNode"] = matches[0]["nodeId"]
+    result = claw_call(settings, "sessions.create", params, profile=profile)
+    if result.get("key") != key:
+        raise KiyoError("OpenClaw hat die neue Sitzung nicht bestätigt.")
+    row = describe_session(settings, key, profile=profile)
+    if parent and row.get("parentSessionKey") != parent:
+        raise KiyoError("OpenClaw hat die gewünschte übergeordnete Sitzung nicht bestätigt.")
+    if node and row.get("execNode") != params["execNode"]:
+        raise KiyoError("OpenClaw hat die Bindung an den gewählten Rechner nicht bestätigt.")
+
+
+def session_history(settings, key, limit, *, profile=None):
+    describe_session(settings, key, profile=profile)
+    result = claw_call(settings, "chat.history", {"sessionKey": key, "limit": limit}, profile=profile)
+    messages = []
+    for row in result.get("messages", []):
+        if row.get("role") not in {"user", "assistant"} or row.get("display") is False:
+            continue
+        content = row.get("content", [])
+        if isinstance(content, list):
+            content = "\n".join(
+                part["text"]
+                for part in content
+                if isinstance(part, dict) and part.get("type") == "text" and isinstance(part.get("text"), str)
+            )
+        if isinstance(content, str) and content.strip():
+            messages.append({"role": row["role"], "text": content})
+    return messages
 
 
 def messages_prompt(soul, history, message):

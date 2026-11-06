@@ -18,6 +18,7 @@ der Verarbeitung und der Sprachausgabe.
 - „Kiyo, was steht morgen im Kalender?“ → liest den ausgewählten Google-Kalender.
 - „Kiyo, welche Rechner sind verbunden?“ → meldet verbundene OpenClaw-Knoten.
 - „Kiyo, gib OpenClaw den Auftrag: …“ → merkt den Auftrag für die Freigabe im Terminal vor.
+- „Kiyo, gib OpenClaw unter Wochenplanung den Auftrag: …“ → merkt den Auftrag für eine neue Untersitzung vor.
 
 Die gleichen Befehle funktionieren vom Terminal.
 
@@ -29,20 +30,30 @@ kiyo use hermes --via api
 kiyo calendar morgen
 kiyo computers
 kiyo sessions openclaw
+kiyo sessions --parent wochenplanung
+kiyo session-history wochenplanung
 kiyo remote-sessions codex --node "Dreambau M4"
 kiyo remote-sessions claude --node "Dreambau M4"
 kiyo tasks
 kiyo approve ID
 kiyo delegate "Fasse die folgenden Punkte zusammen …"
-kiyo delegate --session agent:main:BEKANNTES-ZIEL "Was ist der aktuelle Stand?"
+kiyo delegate --session wochenplanung "Was ist der aktuelle Stand?"
+kiyo delegate --parent wochenplanung "Entwirf eine Gliederung."
 ```
 
 Ein bestätigter Auftrag erhält eine eigene OpenClaw-Sitzung. Mit `--session`
-kannst du einen vorhandenen Sitzungsschlüssel gezielt adressieren. Das
-Kommando `remote-sessions` listet Sitzungen über die vorhandenen OpenClaw-Plugins
+oder „in Wochenplanung“ kannst du eine vorhandene Sitzung gezielt adressieren.
+Mit `--parent` oder „unter Wochenplanung“ legt Kiyo eine neue verknüpfte
+Untersitzung an. Sitzungsnamen kommen als Aliase unter `[openclaw_sessions]` in
+die lokale Konfiguration und zeigen auf den genauen Sitzungsschlüssel.
+`kiyo session-history` liest den Verlauf im Terminal.
+
+Das Kommando `remote-sessions` listet Sitzungen über die vorhandenen OpenClaw-Plugins
 des gekoppelten Rechners. Das Gateway kontrolliert, welche Rechner und
-Schnittstellen erreichbar sind. Kiyo wiederholt einen fehlgeschlagenen Auftrag
-nicht automatisch.
+Schnittstellen erreichbar sind. `kiyo delegate --node "Rechnername" "…"`
+bindet eine neue Sitzung an einen Rechner, der `system.run` anbietet. Dessen
+OpenClaw-Berechtigungen gelten für die Ausführung. Kiyo wiederholt einen
+fehlgeschlagenen Auftrag nicht automatisch.
 
 ## Installation auf einem Apple-Silicon-Mac
 

@@ -12,6 +12,9 @@ agent = "main"
 [openclaw_profiles]
 # dreambau = "dreambau" # name of an independently configured OpenClaw CLI profile
 
+[openclaw_sessions]
+# wochenplanung = "agent:main:mein-exakter-sitzungsschluessel"
+
 [voice]
 # Use dedicated, tool-free agent profiles for the shared room microphone.
 hermes_profile = "kiyovoice"

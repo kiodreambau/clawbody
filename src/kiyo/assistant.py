@@ -22,8 +22,9 @@ SWITCH = re.compile(
 SINGLE = re.compile(rf"({AGENT})(?:\s+(?:über|via)\s+([\w-]+))?[.!?]?", re.IGNORECASE)
 NEW = {"neues gespräch", "neue unterhaltung", "neue sitzung"}
 TASK = re.compile(
-    r"^(?:gib open\s*claw den auftrag|auftrag an open\s*claw|"
-    r"beauftrage open\s*claw)(?:[,:.]\s*|\s+)(.+)$",
+    r"^(?:gib open\s*claw(?: über (?P<via>[\w-]+))?"
+    r"(?: (?P<relation>in|unter) (?P<destination>[^\s,!?]+))? den auftrag"
+    r"|auftrag an open\s*claw|beauftrage open\s*claw)(?:[,:.]\s*|\s+)(?P<text>.+)$",
     re.IGNORECASE | re.DOTALL,
 )
 COMPUTERS = re.compile(r"^(?:welche|zeig(?:e)?(?: mir)? die) (?:rechner|computer|openclaw-knoten)\b", re.IGNORECASE)
@@ -125,17 +126,55 @@ class Assistant:
             state.pop("pending_task", None)
         return "Wir beginnen ein neues Gespräch."
 
-    def stage_task(self, text):
+    def make_task(self, text, *, session=None, parent=None, node=None, profile=None):
+        if not text.strip():
+            raise KiyoError("Gib einen OpenClaw-Auftrag an.")
+        if session and (parent or node):
+            raise KiyoError("Für eine bestehende Sitzung kannst du keinen neuen Elternchat oder Rechner festlegen.")
+        session = backends.session_key(self.settings, session) if session else None
+        parent = backends.session_key(self.settings, parent) if parent else None
+        agent = parent.split(":")[1] if parent else self.settings.get("openclaw", "agent", "main")
+        task_id = uuid.uuid4().hex[:12]
+        key = session or backends.session_key(self.settings, f"agent:{agent}:kiyo-task-{task_id}")
+        return task_id, {
+            "text": text.strip(),
+            "status": "pending",
+            "session": key,
+            "existing": session is not None,
+            "parent": parent,
+            "node": node,
+            "profile": profile,
+        }
+
+    def stage_task(self, text, *, session=None, parent=None, via=None):
         if not text.strip() or len(text) > 4000:
-            raise KiyoError("Ein OpenClaw-Auftrag muss zwischen 1 und 4.000 Zeichen haben.")
+            raise KiyoError("Ein vorgemerkter OpenClaw-Auftrag muss zwischen 1 und 4.000 Zeichen haben.")
         with self.locked_state() as state:
             tasks = state.setdefault("tasks", {})
             if len(tasks) >= 100:
                 raise KiyoError("Kiyos Auftragsliste ist voll.")
-            task = uuid.uuid4().hex[:10]
-            agent = self.settings.get("openclaw", "agent", "main")
-            tasks[task] = {"text": text.strip(), "status": "pending", "session": f"agent:{agent}:kiyo-task-{task}"}
-        return task
+            if not via and state["backend"] == "openclaw":
+                via = state["interface"]
+            profile = transport(self.settings, "openclaw", via) if via else None
+            task_id, task = self.make_task(text, session=session, parent=parent, profile=profile)
+            tasks[task_id] = task
+        return task_id
+
+    def run_task(self, task):
+        profile = task.get("profile")
+        key = task["session"]
+        if task.get("existing"):
+            backends.describe_session(self.settings, key, profile=profile)
+        elif task.get("parent") or task.get("node"):
+            backends.prepare_session(
+                self.settings,
+                key,
+                parent=task.get("parent"),
+                node=task.get("node"),
+                profile=profile,
+            )
+        answer = backends.reply(self.settings, "openclaw", [], task["text"], "", target=key, profile=profile)
+        return {"session": key, "reply": answer}
 
     def tasks(self):
         with self.locked_state() as state:
@@ -148,14 +187,14 @@ class Assistant:
                 raise KiyoError("Dieser Auftrag wartet nicht auf eine Freigabe.")
             task["status"] = "running"
         try:
-            answer = backends.reply(self.settings, "openclaw", [], task["text"], "", target=task["session"])
+            result = self.run_task(task)
         except BaseException:
             with self.locked_state() as state:
                 state["tasks"][task_id]["status"] = "needs-review"
             raise
         with self.locked_state() as state:
             state["tasks"][task_id]["status"] = "completed"
-        return {"session": task["session"], "reply": answer}
+        return result
 
     def ask(self, text, *, voice=False):
         text = text.strip()
@@ -169,7 +208,13 @@ class Assistant:
             return self.new()
         task = TASK.fullmatch(text)
         if task:
-            self.stage_task(task[1])
+            relation = task["relation"]
+            self.stage_task(
+                task["text"],
+                session=task["destination"] if relation == "in" else None,
+                parent=task["destination"] if relation == "unter" else None,
+                via=task["via"],
+            )
             return "Ich habe den OpenClaw-Auftrag vorgemerkt. Du findest ihn mit Kiyo Tasks im Terminal."
         if COMPUTERS.match(text):
             nodes = backends.claw_call(self.settings, "node.list").get("nodes", [])

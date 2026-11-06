@@ -2,9 +2,7 @@
 
 import argparse
 import json
-import re
 import sys
-import uuid
 from urllib.error import URLError
 from urllib.request import Request, urlopen
 
@@ -23,7 +21,7 @@ def build_parser():
     use.add_argument("--via")
     commands.add_parser("new", help="Ein neues Kiyo-Gespräch beginnen")
     commands.add_parser("status", help="Aktiven Agenten und Schnittstelle anzeigen")
-    commands.add_parser("doctor", help="Reachy-Daemon, Hermes und OpenClaw prüfen")
+    commands.add_parser("doctor", help="Reachy-Daemon, USB-Audio, Hermes und OpenClaw prüfen")
     commands.add_parser("wake", help="Den Reachy Mini aufrichten")
     commands.add_parser("sleep", help="Den Reachy Mini in Ruheposition fahren")
     commands.add_parser("robot", help="Über Mikrofon und Lautsprecher am Reachy Mini sprechen")
@@ -41,6 +39,11 @@ def build_parser():
     sessions = commands.add_parser("sessions", help="Agent-Sitzungen auflisten")
     sessions.add_argument("backend", choices=("openclaw", "hermes"), default="openclaw", nargs="?")
     sessions.add_argument("--via", default="lokal")
+    sessions.add_argument("--parent", help="OpenClaw-Untersitzungen eines Schlüssels oder Alias anzeigen")
+    history = commands.add_parser("session-history", help="Verlauf einer ausgewählten OpenClaw-Sitzung lesen")
+    history.add_argument("session")
+    history.add_argument("--via", default="lokal")
+    history.add_argument("--limit", type=int, choices=range(1, 31), default=10)
     nodes = commands.add_parser("computers", help="Gekoppelte OpenClaw-Rechner anzeigen")
     nodes.add_argument("--via", default="lokal")
     remote = commands.add_parser("remote-sessions", help="Sitzungen eines gekoppelten Rechners auflisten")
@@ -53,7 +56,10 @@ def build_parser():
     approve.add_argument("id")
     delegate = commands.add_parser("delegate", help="Auftrag in eigener oder bestehender OpenClaw-Sitzung ausführen")
     delegate.add_argument("--via", default="lokal")
-    delegate.add_argument("--session")
+    destination = delegate.add_mutually_exclusive_group()
+    destination.add_argument("--session", help="Bestehende Sitzung über Schlüssel oder Alias verwenden")
+    destination.add_argument("--parent", help="Eine neue Untersitzung unter diesem Schlüssel oder Alias anlegen")
+    delegate.add_argument("--node", help="Ausführung in einer neuen Sitzung an einen gekoppelten Rechner binden")
     delegate.add_argument("text", nargs="+")
     return parser
 
@@ -62,6 +68,7 @@ def doctor(settings):
     results = {}
     for name, probe in {
         "reachy": lambda: reachy_status(settings),
+        "reachy_audio": lambda: reachy_audio_status(settings),
         "hermes": lambda: backends.hermes(settings, "/health", authenticated=False)["status"],
         "openclaw": lambda: backends.claw_call(settings, "health")["ok"],
     }.items():
@@ -70,6 +77,24 @@ def doctor(settings):
         except (KiyoError, KeyError, ValueError):
             results[name] = "nicht erreichbar"
     return results
+
+
+def reachy_audio_status(settings):
+    try:
+        import sounddevice
+    except ImportError:
+        return "Audio-Abhängigkeiten fehlen"
+
+    from .robot import audio_device
+
+    status = {}
+    for direction in ("input", "output"):
+        try:
+            _, device = audio_device(settings, sounddevice, direction)
+            status[direction] = device["name"]
+        except (KiyoError, sounddevice.PortAudioError):
+            status[direction] = "kein eindeutiges Reachy-Audiogerät"
+    return status
 
 
 def reachy_request(settings, path, method="GET"):
@@ -130,15 +155,26 @@ def dispatch(args, settings):
     if command == "approve":
         return assistant.approve_task(args.id)
     if command == "sessions" and args.backend == "hermes":
+        if args.parent:
+            raise KiyoError("--parent ist für OpenClaw-Sitzungen verfügbar.")
         result = backends.hermes(settings, "/api/sessions?limit=20&include_children=true")
         return [{k: row.get(k) for k in ("id", "title", "parent_session_id")} for row in result.get("sessions", [])]
     profile = transport(settings, "openclaw", args.via)
     if command == "sessions":
-        result = backends.claw_call(settings, "sessions.list", {"limit": 30}, profile=profile)
+        params = {"limit": 30}
+        if args.parent:
+            params["spawnedBy"] = backends.session_key(settings, args.parent)
+        result = backends.claw_call(settings, "sessions.list", params, profile=profile)
         return [
-            {k: row.get(k) for k in ("key", "label", "kind", "spawnedBy", "hasActiveRun")}
+            {
+                k: row.get(k)
+                for k in ("key", "label", "displayName", "kind", "parentSessionKey", "spawnedBy", "hasActiveRun")
+            }
             for row in result.get("sessions", [])
         ]
+    if command == "session-history":
+        key = backends.session_key(settings, args.session)
+        return backends.session_history(settings, key, args.limit, profile=profile)
     if command == "remote-sessions":
         result = backends.remote_sessions(settings, args.backend, args.node, args.limit, profile=profile)
         return [
@@ -148,14 +184,14 @@ def dispatch(args, settings):
     if command == "computers":
         result = backends.claw_call(settings, "node.list", profile=profile)
         return [{k: row.get(k) for k in ("displayName", "connected", "platform")} for row in result.get("nodes", [])]
-    agent = settings.get("openclaw", "agent", "main")
-    key = args.session or f"agent:{agent}:kiyo-auftrag-{uuid.uuid4().hex[:12]}"
-    if not re.fullmatch(r"agent:[a-z0-9_-]+:[a-zA-Z0-9_:.@/+\-=]{1,250}", key):
-        raise KiyoError("Bitte gib einen vollständigen OpenClaw-Sitzungsschlüssel an.")
-    return {
-        "session": key,
-        "reply": backends.reply(settings, "openclaw", [], " ".join(args.text), "", profile=profile, target=key),
-    }
+    _, task = assistant.make_task(
+        " ".join(args.text),
+        session=args.session,
+        parent=args.parent,
+        node=args.node,
+        profile=profile,
+    )
+    return assistant.run_task(task)
 
 
 def main():

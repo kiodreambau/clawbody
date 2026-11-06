@@ -10,6 +10,7 @@ from zoneinfo import ZoneInfo
 
 from kiyo import backends, calendar
 from kiyo.assistant import Assistant
+from kiyo.cli import build_parser, dispatch
 from kiyo.robot import WAKE
 from kiyo.settings import KiyoError, Settings
 
@@ -80,6 +81,63 @@ class AssistantTest(unittest.TestCase):
             reply.assert_called_once()
             with self.assertRaises(KiyoError):
                 self.assistant.approve_task(task_id)
+
+    def test_spoken_child_task_keeps_the_selected_gateway_until_approval(self):
+        self.settings.values.update(
+            openclaw_sessions={"planung": "agent:ops:calendar"},
+            openclaw_profiles={"server": "dreambau"},
+        )
+        self.assistant.use("openclaw", "server")
+        with (
+            patch.object(backends, "prepare_session") as prepare,
+            patch.object(backends, "reply", return_value="Geprüft.") as reply,
+        ):
+            self.assistant.ask("Gib OpenClaw unter Planung den Auftrag: prüfe Status", voice=True)
+            prepare.assert_not_called()
+            self.assistant.use("hermes", "api")
+            task_id = next(iter(self.assistant.tasks()))
+            result = self.assistant.approve_task(task_id)
+        self.assertTrue(result["session"].startswith("agent:ops:kiyo-task-"))
+        prepare.assert_called_once_with(
+            self.settings,
+            result["session"],
+            parent="agent:ops:calendar",
+            node=None,
+            profile="dreambau",
+        )
+        self.assertEqual(reply.call_args.kwargs["profile"], "dreambau")
+
+    def test_delegate_does_not_send_to_node_without_execution_capability(self):
+        args = build_parser().parse_args(["delegate", "--node", "M4", "Status"])
+        nodes = {"nodes": [{"displayName": "M4", "connected": True, "paired": True, "commands": []}]}
+        with patch.object(backends, "claw_call", return_value=nodes) as rpc, patch.object(backends, "reply") as reply:
+            with self.assertRaisesRegex(KiyoError, "keine Befehlsausführung"):
+                dispatch(args, self.settings)
+        rpc.assert_called_once_with(self.settings, "node.list", profile=None)
+        reply.assert_not_called()
+
+    def test_child_creation_verifies_lineage_before_sending(self):
+        parent = "agent:main:root"
+        child = "agent:main:child"
+        with patch.object(
+            backends,
+            "claw_call",
+            side_effect=[{"session": {"key": parent, "spawnDepth": 2}}, {"key": child}, {"session": {"key": child}}],
+        ) as rpc:
+            with self.assertRaisesRegex(KiyoError, "übergeordnete Sitzung"):
+                backends.prepare_session(self.settings, child, parent=parent)
+        self.assertEqual(rpc.call_args_list[1].args[2]["spawnDepth"], 3)
+
+    def test_session_history_filters_tools_and_hidden_messages(self):
+        key = "agent:main:root"
+        messages = [
+            {"role": "tool", "content": "private log"},
+            {"role": "assistant", "display": False, "content": "hidden message"},
+            {"role": "assistant", "content": [{"type": "text", "text": "sichtbar"}]},
+        ]
+        with patch.object(backends, "claw_call", side_effect=[{"session": {"key": key}}, {"messages": messages}]):
+            history = backends.session_history(self.settings, key, 10)
+        self.assertEqual(history, [{"role": "assistant", "text": "sichtbar"}])
 
     def test_voice_agents_fail_closed_without_restricted_profiles(self):
         with self.assertRaisesRegex(KiyoError, "eigenes Hermes-Profil"):
